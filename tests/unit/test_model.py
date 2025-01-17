@@ -182,6 +182,7 @@ class TestOperationModelFromService(unittest.TestCase):
                     'errors': [{'shape': 'NoSuchResourceException'}],
                     'documentation': 'Docs for OperationName',
                     'authtype': 'v4',
+                    'auth': ['aws.auth#sigv4'],
                 },
                 'OperationTwo': {
                     'http': {
@@ -208,6 +209,7 @@ class TestOperationModelFromService(unittest.TestCase):
                     },
                     'errors': [{'shape': 'NoSuchResourceException'}],
                     'documentation': 'Docs for PayloadOperation',
+                    'requestcompression': {'encodings': ['gzip']},
                 },
                 'NoBodyOperation': {
                     'http': {
@@ -395,6 +397,22 @@ class TestOperationModelFromService(unittest.TestCase):
             operation.error_shapes[0].name, 'NoSuchResourceException'
         )
 
+    def test_has_auth(self):
+        operation = self.service_model.operation_model('OperationName')
+        self.assertEqual(operation.auth, ["aws.auth#sigv4"])
+
+    def test_auth_not_set(self):
+        operation = self.service_model.operation_model('OperationTwo')
+        self.assertIsNone(operation.auth)
+
+    def test_has_resolved_auth_type(self):
+        operation = self.service_model.operation_model('OperationName')
+        self.assertEqual(operation.resolved_auth_type, 'v4')
+
+    def test_resolved_auth_type_not_set(self):
+        operation = self.service_model.operation_model('OperationTwo')
+        self.assertIsNone(operation.resolved_auth_type)
+
     def test_has_auth_type(self):
         operation = self.service_model.operation_model('OperationName')
         self.assertEqual(operation.auth_type, 'v4')
@@ -521,11 +539,18 @@ class TestOperationModelFromService(unittest.TestCase):
         self.assertEqual(static_ctx_param2.name, 'booleanStaticContextParam')
         self.assertEqual(static_ctx_param2.value, True)
 
-    def test_static_context_parameter_abent(self):
+    def test_static_context_parameter_absent(self):
         service_model = model.ServiceModel(self.model)
         operation = service_model.operation_model('OperationTwo')
         self.assertIsInstance(operation.static_context_parameters, list)
         self.assertEqual(len(operation.static_context_parameters), 0)
+
+    def test_request_compression(self):
+        service_model = model.ServiceModel(self.model)
+        operation = service_model.operation_model('PayloadOperation')
+        self.assertEqual(
+            operation.request_compression, {'encodings': ['gzip']}
+        )
 
 
 class TestOperationModelEventStreamTypes(unittest.TestCase):

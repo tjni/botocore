@@ -189,6 +189,38 @@ class TestWaiterModel(unittest.TestCase):
             success_acceptor({'Error': {'Code': 'DoesNotExistErorr'}})
         )
 
+    def test_single_waiter_supports_no_error(self):
+        single_waiter = {
+            'acceptors': [
+                {
+                    'state': 'success',
+                    'matcher': 'error',
+                    'expected': False,
+                }
+            ],
+        }
+        single_waiter.update(self.boiler_plate_config)
+        config = SingleWaiterConfig(single_waiter)
+        success_acceptor = config.acceptors[0].matcher_func
+        self.assertTrue(success_acceptor({}))
+        self.assertFalse(success_acceptor({'Error': {'Code': 'ExampleError'}}))
+
+    def test_single_waiter_supports_any_error(self):
+        single_waiter = {
+            'acceptors': [
+                {
+                    'state': 'success',
+                    'matcher': 'error',
+                    'expected': True,
+                }
+            ],
+        }
+        single_waiter.update(self.boiler_plate_config)
+        config = SingleWaiterConfig(single_waiter)
+        success_acceptor = config.acceptors[0].matcher_func
+        self.assertTrue(success_acceptor({'Error': {'Code': 'ExampleError1'}}))
+        self.assertTrue(success_acceptor({'Error': {'Code': 'ExampleError2'}}))
+
     def test_unknown_matcher(self):
         unknown_type = 'arbitrary_type'
         single_waiter = {
@@ -769,7 +801,7 @@ class TestCreateWaiter(unittest.TestCase):
             (
                 '    Polls :py:meth:`MyService.Client.foo` every 1 '
                 'seconds until a successful state is reached. An error '
-                'is returned after 1 failed checks.'
+                'is raised after 1 failed checks.'
             ),
             '    **Request Syntax**',
             '    ::',

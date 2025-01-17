@@ -32,11 +32,6 @@ MEMBER_NAME_CHARS = set(string.ascii_letters + string.digits)
 # to reference all the extra output keys. Nothing should ever be added to this
 # list, it represents all the current released paginators that fail this test.
 KNOWN_EXTRA_OUTPUT_KEYS = [
-    'alexaforbusiness.SearchUsers.TotalCount',
-    'alexaforbusiness.SearchProfiles.TotalCount',
-    'alexaforbusiness.SearchSkillGroups.TotalCount',
-    'alexaforbusiness.SearchDevices.TotalCount',
-    'alexaforbusiness.SearchRooms.TotalCount',
     'apigateway.GetApiKeys.warnings',
     'apigateway.GetUsage.usagePlanId',
     'apigateway.GetUsage.startDate',
@@ -45,7 +40,9 @@ KNOWN_EXTRA_OUTPUT_KEYS = [
     'cloudfront.ListCloudFrontOriginAccessIdentities.CloudFrontOriginAccessIdentityList',
     'cloudfront.ListDistributions.DistributionList',
     'cloudfront.ListInvalidations.InvalidationList',
+    'cloudfront.ListPublicKeys.PublicKeyList',
     'cloudfront.ListStreamingDistributions.StreamingDistributionList',
+    'cloudfront.ListKeyValueStores.KeyValueStoreList',
     'codedeploy.ListDeploymentGroups.applicationName',
     'dms.DescribeTableStatistics.ReplicationTaskArn',
     'dms.DescribeReplicationTaskAssessmentResults.BucketName',
@@ -85,7 +82,6 @@ KNOWN_EXTRA_OUTPUT_KEYS = [
     'route53.ListResourceRecordSets.MaxItems',
     's3.ListMultipartUploads.Delimiter',
     's3.ListMultipartUploads.KeyMarker',
-    's3.ListMultipartUploads.Prefix',
     's3.ListMultipartUploads.Bucket',
     's3.ListMultipartUploads.MaxUploads',
     's3.ListMultipartUploads.UploadIdMarker',
@@ -94,13 +90,11 @@ KNOWN_EXTRA_OUTPUT_KEYS = [
     's3.ListObjectVersions.Delimiter',
     's3.ListObjectVersions.VersionIdMarker',
     's3.ListObjectVersions.KeyMarker',
-    's3.ListObjectVersions.Prefix',
     's3.ListObjectVersions.Name',
     's3.ListObjectVersions.EncodingType',
     's3.ListObjects.MaxKeys',
     's3.ListObjects.Delimiter',
     's3.ListObjects.NextMarker',
-    's3.ListObjects.Prefix',
     's3.ListObjects.Marker',
     's3.ListObjects.Name',
     's3.ListObjects.EncodingType',
@@ -109,7 +103,6 @@ KNOWN_EXTRA_OUTPUT_KEYS = [
     's3.ListObjectsV2.Delimiter',
     's3.ListObjectsV2.ContinuationToken',
     's3.ListObjectsV2.KeyCount',
-    's3.ListObjectsV2.Prefix',
     's3.ListObjectsV2.Name',
     's3.ListObjectsV2.EncodingType',
     's3.ListParts.PartNumberMarker',
@@ -149,6 +142,7 @@ def _pagination_configs():
             yield (op_name, single_config, service_model)
 
 
+@pytest.mark.validates_models
 @pytest.mark.parametrize(
     "operation_name, page_config, service_model", _pagination_configs()
 )
@@ -165,8 +159,7 @@ def _validate_known_pagination_keys(page_config):
     for key in page_config:
         if key not in KNOWN_PAGE_KEYS:
             raise AssertionError(
-                "Unknown key '%s' in pagination config: %s"
-                % (key, page_config)
+                f"Unknown key '{key}' in pagination config: {page_config}"
             )
 
 
@@ -174,7 +167,7 @@ def _valiate_result_key_exists(page_config):
     if 'result_key' not in page_config:
         raise AssertionError(
             "Required key 'result_key' is missing "
-            "from pagination config: %s" % page_config
+            f"from pagination config: {page_config}"
         )
 
 
@@ -182,7 +175,7 @@ def _validate_referenced_operation_exists(operation_name, service_model):
     if operation_name not in service_model.operation_names:
         raise AssertionError(
             "Pagination config refers to operation that "
-            "does not exist: %s" % operation_name
+            f"does not exist: {operation_name}"
         )
 
 
@@ -192,7 +185,7 @@ def _validate_operation_has_output(operation_name, service_model):
     if output is None or not output.members:
         raise AssertionError(
             "Pagination config refers to operation "
-            "that does not have any output: %s" % operation_name
+            f"that does not have any output: {operation_name}"
         )
 
 
@@ -206,17 +199,16 @@ def _validate_input_keys_match(operation_name, page_config, service_model):
     for token in input_tokens:
         if token not in valid_input_names:
             raise AssertionError(
-                "input_token '%s' refers to a non existent "
-                "input member for operation: %s" % (token, operation_name)
+                f"input_token '{token}' refers to a non existent "
+                f"input member for operation: {operation_name}"
             )
     if 'limit_key' in page_config:
         limit_key = page_config['limit_key']
         if limit_key not in valid_input_names:
             raise AssertionError(
-                "limit_key '%s' refers to a non existent "
-                "input member for operation: %s, valid keys: "
-                "%s"
-                % (
+                "limit_key '{}' refers to a non existent "
+                "input member for operation: {}, valid keys: "
+                "{}".format(
                     limit_key,
                     operation_name,
                     ', '.join(list(valid_input_names)),
@@ -240,24 +232,21 @@ def _validate_output_keys_match(operation_name, page_config, service_model):
         else:
             if output_key not in output_members:
                 raise AssertionError(
-                    "Pagination key '%s' refers to an output "
-                    "member that does not exist: %s" % (key_name, output_key)
+                    f"Pagination key '{key_name}' refers to an output "
+                    f"member that does not exist: {output_key}"
                 )
             output_members.remove(output_key)
 
     for member in list(output_members):
-        key = "{}.{}.{}".format(
-            service_model.service_name, operation_name, member
-        )
+        key = f"{service_model.service_name}.{operation_name}.{member}"
         if key in KNOWN_EXTRA_OUTPUT_KEYS:
             output_members.remove(member)
 
     if output_members:
         raise AssertionError(
             "There are member names in the output shape of "
-            "%s that are not accounted for in the pagination "
-            "config for service %s: %s"
-            % (
+            "{} that are not accounted for in the pagination "
+            "config for service {}: {}".format(
                 operation_name,
                 service_model.service_name,
                 ', '.join(output_members),
@@ -277,7 +266,7 @@ def _validate_jmespath_compiles(expression):
     except JMESPathError as e:
         raise AssertionError(
             "Invalid JMESPath expression used "
-            "in pagination config: %s\nerror: %s" % (expression, e)
+            f"in pagination config: {expression}\nerror: {e}"
         )
 
 

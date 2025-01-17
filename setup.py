@@ -25,8 +25,16 @@ def find_version(*file_paths):
 requires = [
     'jmespath>=0.7.1,<2.0.0',
     'python-dateutil>=2.1,<3.0.0',
-    'urllib3>=1.25.4,<1.27',
+    # Prior to Python 3.10, Python doesn't require openssl 1.1.1
+    # but urllib3 2.0+ does. This means all botocore users will be
+    # broken by default on Amazon Linux 2 and AWS Lambda without this pin.
+    'urllib3>=1.25.4,<1.27 ; python_version < "3.10"',
+    'urllib3>=1.25.4,!=2.2.0,<3 ; python_version >= "3.10"',
 ]
+
+extras_require = {
+    'crt': ['awscrt==0.23.4'],
+}
 
 setup(
     name='botocore',
@@ -43,8 +51,9 @@ setup(
     },
     include_package_data=True,
     install_requires=requires,
+    extras_require=extras_require,
     license="Apache License 2.0",
-    python_requires=">= 3.7",
+    python_requires=">= 3.8",
     classifiers=[
         'Development Status :: 5 - Production/Stable',
         'Intended Audience :: Developers',
@@ -52,11 +61,13 @@ setup(
         'Natural Language :: English',
         'License :: OSI Approved :: Apache Software License',
         'Programming Language :: Python',
+        'Programming Language :: Python :: 3 :: Only',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
     ],
 )

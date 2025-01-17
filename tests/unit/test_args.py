@@ -20,13 +20,14 @@ from botocore.configprovider import ConfigValueStore
 from botocore.hooks import HierarchicalEmitter
 from botocore.model import ServiceModel
 from botocore.useragent import UserAgentString
-from tests import mock, unittest
+from tests import get_botocore_default_config_mapping, mock, unittest
 
 
 class TestCreateClientArgs(unittest.TestCase):
     def setUp(self):
         self.event_emitter = mock.Mock(HierarchicalEmitter)
-        self.config_store = ConfigValueStore()
+        default_config_mapping = get_botocore_default_config_mapping()
+        self.config_store = ConfigValueStore(mapping=default_config_mapping)
         user_agent_creator = UserAgentString(
             platform_name=None,
             platform_version=None,
@@ -186,7 +187,7 @@ class TestCreateClientArgs(unittest.TestCase):
             {
                 'region_name': 'us-west-2',
                 'signature_version': 's3v4',
-                'enpoint_url': 'https://s3-us-west-2.amazonaws.com',
+                'endpoint_url': 'https://s3-us-west-2.amazonaws.com',
                 'signing_name': 's3',
                 'signing_region': 'us-west-2',
                 'metadata': {},
@@ -528,6 +529,155 @@ class TestCreateClientArgs(unittest.TestCase):
                 endpoints_ruleset_data=None,
             )
             m.assert_not_called()
+
+    def test_request_compression_client_config(self):
+        input_config = Config(
+            disable_request_compression=True,
+            request_min_compression_size_bytes=100,
+        )
+        client_args = self.call_get_client_args(client_config=input_config)
+        config = client_args['client_config']
+        self.assertEqual(config.request_min_compression_size_bytes, 100)
+        self.assertTrue(config.disable_request_compression)
+
+    def test_request_compression_config_store(self):
+        self.config_store.set_config_variable(
+            'request_min_compression_size_bytes', 100
+        )
+        self.config_store.set_config_variable(
+            'disable_request_compression', True
+        )
+        config = self.call_get_client_args()['client_config']
+        self.assertEqual(config.request_min_compression_size_bytes, 100)
+        self.assertTrue(config.disable_request_compression)
+
+    def test_request_compression_client_config_overrides_config_store(self):
+        self.config_store.set_config_variable(
+            'request_min_compression_size_bytes', 100
+        )
+        self.config_store.set_config_variable(
+            'disable_request_compression', True
+        )
+        input_config = Config(
+            disable_request_compression=False,
+            request_min_compression_size_bytes=1,
+        )
+        client_args = self.call_get_client_args(client_config=input_config)
+        config = client_args['client_config']
+        self.assertEqual(config.request_min_compression_size_bytes, 1)
+        self.assertFalse(config.disable_request_compression)
+
+    def test_coercible_value_request_min_compression_size_bytes(self):
+        config = Config(request_min_compression_size_bytes='100')
+        client_args = self.call_get_client_args(client_config=config)
+        config = client_args['client_config']
+        self.assertEqual(config.request_min_compression_size_bytes, 100)
+
+    def test_coercible_value_disable_request_compression(self):
+        config = Config(disable_request_compression='true')
+        client_args = self.call_get_client_args(client_config=config)
+        config = client_args['client_config']
+        self.assertTrue(config.disable_request_compression)
+
+    def test_bad_type_request_min_compression_size_bytes(self):
+        with self.assertRaises(exceptions.InvalidConfigError):
+            config = Config(request_min_compression_size_bytes='foo')
+            self.call_get_client_args(client_config=config)
+        self.config_store.set_config_variable(
+            'request_min_compression_size_bytes', 'foo'
+        )
+        with self.assertRaises(exceptions.InvalidConfigError):
+            self.call_get_client_args()
+
+    def test_low_min_request_min_compression_size_bytes(self):
+        with self.assertRaises(exceptions.InvalidConfigError):
+            config = Config(request_min_compression_size_bytes=0)
+            self.call_get_client_args(client_config=config)
+        self.config_store.set_config_variable(
+            'request_min_compression_size_bytes', 0
+        )
+        with self.assertRaises(exceptions.InvalidConfigError):
+            self.call_get_client_args()
+
+    def test_high_max_request_min_compression_size_bytes(self):
+        with self.assertRaises(exceptions.InvalidConfigError):
+            config = Config(request_min_compression_size_bytes=9999999)
+            self.call_get_client_args(client_config=config)
+        self.config_store.set_config_variable(
+            'request_min_compression_size_bytes', 9999999
+        )
+        with self.assertRaises(exceptions.InvalidConfigError):
+            self.call_get_client_args()
+
+    def test_bad_value_disable_request_compression(self):
+        input_config = Config(disable_request_compression='foo')
+        client_args = self.call_get_client_args(client_config=input_config)
+        config = client_args['client_config']
+        self.assertFalse(config.disable_request_compression)
+
+    def test_checksum_default_client_config(self):
+        input_config = Config()
+        client_args = self.call_get_client_args(client_config=input_config)
+        config = client_args["client_config"]
+        self.assertEqual(config.request_checksum_calculation, "when_supported")
+        self.assertEqual(config.response_checksum_validation, "when_supported")
+
+    def test_checksum_client_config(self):
+        input_config = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
+        client_args = self.call_get_client_args(client_config=input_config)
+        config = client_args['client_config']
+        self.assertEqual(config.request_checksum_calculation, "when_required")
+        self.assertEqual(config.response_checksum_validation, "when_required")
+
+    def test_checksum_config_store(self):
+        self.config_store.set_config_variable(
+            "request_checksum_calculation", "when_required"
+        )
+        self.config_store.set_config_variable(
+            "response_checksum_validation", "when_required"
+        )
+        config = self.call_get_client_args()['client_config']
+        self.assertEqual(config.request_checksum_calculation, "when_required")
+        self.assertEqual(config.response_checksum_validation, "when_required")
+
+    def test_checksum_client_config_overrides_config_store(self):
+        self.config_store.set_config_variable(
+            "request_checksum_calculation", "when_supported"
+        )
+        self.config_store.set_config_variable(
+            "response_checksum_validation", "when_supported"
+        )
+        input_config = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
+        client_args = self.call_get_client_args(client_config=input_config)
+        config = client_args['client_config']
+        self.assertEqual(config.request_checksum_calculation, "when_required")
+        self.assertEqual(config.response_checksum_validation, "when_required")
+
+    def test_request_checksum_calculation_invalid_client_config(self):
+        with self.assertRaises(exceptions.InvalidChecksumConfigError):
+            config = Config(request_checksum_calculation="invalid_config")
+            self.call_get_client_args(client_config=config)
+        self.config_store.set_config_variable(
+            'request_checksum_calculation', "invalid_config"
+        )
+        with self.assertRaises(exceptions.InvalidChecksumConfigError):
+            self.call_get_client_args()
+
+    def test_response_checksum_validation_invalid_client_config(self):
+        with self.assertRaises(exceptions.InvalidChecksumConfigError):
+            config = Config(response_checksum_validation="invalid_config")
+            self.call_get_client_args(client_config=config)
+        self.config_store.set_config_variable(
+            'response_checksum_validation', "invalid_config"
+        )
+        with self.assertRaises(exceptions.InvalidChecksumConfigError):
+            self.call_get_client_args()
 
 
 class TestEndpointResolverBuiltins(unittest.TestCase):

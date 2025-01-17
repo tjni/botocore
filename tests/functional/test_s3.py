@@ -10,15 +10,15 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
-import base64
 import datetime
 import re
 
 import pytest
+from dateutil.tz import tzutc
 
 import botocore.session
 from botocore import UNSIGNED
-from botocore.compat import get_md5, parse_qs, urlsplit
+from botocore.compat import parse_qs, urlsplit
 from botocore.config import Config
 from botocore.exceptions import (
     ClientError,
@@ -27,12 +27,12 @@ from botocore.exceptions import (
     UnsupportedS3AccesspointConfigurationError,
     UnsupportedS3ConfigurationError,
 )
-from botocore.parsers import ResponseParserError
 from tests import (
     BaseSessionTest,
     ClientHTTPStubber,
     FreezeTime,
     create_session,
+    get_checksum_cls,
     mock,
     requires_crt,
     temporary_file,
@@ -68,22 +68,39 @@ class BaseS3ClientConfigurationTest(BaseSessionTest):
         r"(?P<signing_name>[a-z0-9-]+)/"
     )
 
+    _V4A_AUTH_REGEX = re.compile(
+        r"AWS4-ECDSA-P256-SHA256 "
+        r"Credential=\w+/\d+/"
+        r"(?P<signing_name>[a-z0-9-]+)/"
+    )
+
     def setUp(self):
         super().setUp()
         self.region = "us-west-2"
 
+    def _get_auth_regex(self, auth_header):
+        if auth_header.startswith("AWS4-ECDSA"):
+            return self._V4A_AUTH_REGEX
+        return self._V4_AUTH_REGEX
+
     def assert_signing_region(self, request, expected_region):
         auth_header = request.headers["Authorization"].decode("utf-8")
         actual_region = None
-        match = self._V4_AUTH_REGEX.match(auth_header)
-        if match:
+        auth_regex = self._get_auth_regex(auth_header)
+        match = auth_regex.match(auth_header)
+        if match and auth_regex is self._V4_AUTH_REGEX:
             actual_region = match.group("signing_region")
-        self.assertEqual(expected_region, actual_region)
+            self.assertEqual(expected_region, actual_region)
+        else:
+            # SigV4a does not sign with a specific region
+            region_set = request.headers.get('X-Amz-Region-Set')
+            self.assertEqual(region_set, b'*')
 
     def assert_signing_name(self, request, expected_name):
         auth_header = request.headers["Authorization"].decode("utf-8")
         actual_name = None
-        match = self._V4_AUTH_REGEX.match(auth_header)
+        auth_regex = self._get_auth_regex(auth_header)
+        match = auth_regex.match(auth_header)
         if match:
             actual_name = match.group("signing_name")
         self.assertEqual(expected_name, actual_name)
@@ -417,12 +434,12 @@ class TestS3Copy(BaseS3OperationTest):
         http_stubber.start()
         return client, http_stubber
 
-    def test_s3_copy_object_with_empty_response(self):
+    def test_s3_copy_object_with_incomplete_response(self):
         self.client, self.http_stubber = self.create_stubbed_s3_client(
             region_name="us-east-1"
         )
 
-        empty_body = b""
+        incomplete_body = b'<?xml version="1.0" encoding="UTF-8"?>\n\n\n'
         complete_body = (
             b'<?xml version="1.0" encoding="UTF-8"?>\n\n'
             b"<CopyObjectResult "
@@ -430,8 +447,7 @@ class TestS3Copy(BaseS3OperationTest):
             b"<LastModified>2020-04-21T21:03:31.000Z</LastModified>"
             b"<ETag>&quot;s0mEcH3cK5uM&quot;</ETag></CopyObjectResult>"
         )
-
-        self.http_stubber.add_response(status=200, body=empty_body)
+        self.http_stubber.add_response(status=200, body=incomplete_body)
         self.http_stubber.add_response(status=200, body=complete_body)
         response = self.client.copy_object(
             Bucket="bucket",
@@ -444,19 +460,86 @@ class TestS3Copy(BaseS3OperationTest):
         self.assertEqual(response["ResponseMetadata"]["HTTPStatusCode"], 200)
         self.assertTrue("CopyObjectResult" in response)
 
-    def test_s3_copy_object_with_incomplete_response(self):
+
+class TestS3200ErrorResponse(BaseS3OperationTest):
+    def create_s3_client(self, **kwargs):
+        client_kwargs = {"region_name": self.region}
+        client_kwargs.update(kwargs)
+        return self.session.create_client("s3", **client_kwargs)
+
+    def create_stubbed_s3_client(self, **kwargs):
+        client = self.create_s3_client(**kwargs)
+        http_stubber = ClientHTTPStubber(client)
+        http_stubber.start()
+        return client, http_stubber
+
+    def test_s3_200_with_error_response(self):
         self.client, self.http_stubber = self.create_stubbed_s3_client(
             region_name="us-east-1"
         )
-
-        incomplete_body = b'<?xml version="1.0" encoding="UTF-8"?>\n\n\n'
-        self.http_stubber.add_response(status=200, body=incomplete_body)
-        with self.assertRaises(ResponseParserError):
+        error_body = (
+            b"<Error>"
+            b"<Code>SlowDown</Code>"
+            b"<Message>Please reduce your request rate.</Message>"
+            b"</Error>"
+        )
+        # Populate 5 attempts for SlowDown to validate
+        # we reached four max retries and raised an exception.
+        for i in range(5):
+            self.http_stubber.add_response(status=200, body=error_body)
+        with self.assertRaises(botocore.exceptions.ClientError) as context:
             self.client.copy_object(
                 Bucket="bucket",
                 CopySource="other-bucket/test.txt",
                 Key="test.txt",
             )
+        self.assertEqual(len(self.http_stubber.requests), 5)
+        self.assertEqual(
+            context.exception.response["ResponseMetadata"]["HTTPStatusCode"],
+            500,
+        )
+        self.assertEqual(
+            context.exception.response["Error"]["Code"], "SlowDown"
+        )
+
+    def test_s3_200_with_no_error_response(self):
+        self.client, self.http_stubber = self.create_stubbed_s3_client(
+            region_name="us-east-1"
+        )
+        self.http_stubber.add_response(status=200, body=b"<NotAnError/>")
+
+        response = self.client.copy_object(
+            Bucket="bucket",
+            CopySource="other-bucket/test.txt",
+            Key="test.txt",
+        )
+
+        # Validate that the status code remains 200.
+        self.assertEqual(len(self.http_stubber.requests), 1)
+        self.assertEqual(response["ResponseMetadata"]["HTTPStatusCode"], 200)
+
+    def test_s3_200_with_error_response_on_streaming_operation(self):
+        self.client, self.http_stubber = self.create_stubbed_s3_client(
+            region_name="us-east-1"
+        )
+        self.http_stubber.add_response(status=200, body=b"<Error/>")
+        response = self.client.get_object(Bucket="bucket", Key="test.txt")
+
+        # Validate that the status code remains 200 because we don't
+        # process 200-with-error responses on streaming operations.
+        self.assertEqual(len(self.http_stubber.requests), 1)
+        self.assertEqual(response["ResponseMetadata"]["HTTPStatusCode"], 200)
+
+    def test_s3_200_response_with_no_body(self):
+        self.client, self.http_stubber = self.create_stubbed_s3_client(
+            region_name="us-east-1"
+        )
+        self.http_stubber.add_response(status=200)
+        response = self.client.head_object(Bucket="bucket", Key="test.txt")
+
+        # Validate that the status code remains 200 on operations without a body.
+        self.assertEqual(len(self.http_stubber.requests), 1)
+        self.assertEqual(response["ResponseMetadata"]["HTTPStatusCode"], 200)
 
 
 class TestAccesspointArn(BaseS3ClientConfigurationTest):
@@ -1323,6 +1406,41 @@ class TestS3PutObject(BaseS3OperationTest):
             self.assertEqual(len(http_stubber.requests), 2)
 
 
+class TestS3ExpiresHeaderResponse(BaseS3OperationTest):
+    def test_valid_expires_value_in_response(self):
+        expires_value = "Thu, 01 Jan 1970 00:00:00 GMT"
+        mock_headers = {'expires': expires_value}
+        s3 = self.session.create_client("s3")
+        with ClientHTTPStubber(s3) as http_stubber:
+            http_stubber.add_response(headers=mock_headers)
+            response = s3.get_object(Bucket='mybucket', Key='mykey')
+            self.assertEqual(
+                response.get('Expires'),
+                datetime.datetime(1970, 1, 1, tzinfo=tzutc()),
+            )
+            self.assertEqual(response.get('ExpiresString'), expires_value)
+
+    def test_invalid_expires_value_in_response(self):
+        expires_value = "Invalid Date"
+        mock_headers = {'expires': expires_value}
+        warning_msg = 'Failed to parse the "Expires" member as a timestamp'
+        s3 = self.session.create_client("s3")
+        with self.assertLogs('botocore.handlers', level='WARNING') as log:
+            with ClientHTTPStubber(s3) as http_stubber:
+                http_stubber.add_response(headers=mock_headers)
+                response = s3.get_object(Bucket='mybucket', Key='mykey')
+                self.assertNotIn(
+                    'expires',
+                    response.get('ResponseMetadata').get('HTTPHeaders'),
+                )
+                self.assertNotIn('Expires', response)
+                self.assertEqual(response.get('ExpiresString'), expires_value)
+                self.assertTrue(
+                    any(warning_msg in entry for entry in log.output),
+                    f'Expected warning message not found in logs. Logs: {log.output}',
+                )
+
+
 class TestWriteGetObjectResponse(BaseS3ClientConfigurationTest):
     def create_stubbed_s3_client(self, **kwargs):
         client = self.create_s3_client(**kwargs)
@@ -1346,7 +1464,7 @@ class TestWriteGetObjectResponse(BaseS3ClientConfigurationTest):
             self.assert_signing_region(request, region)
             expected_endpoint = (
                 "endpoint-io.a1c1d5c7.s3-object-lambda."
-                "%s.amazonaws.com" % region
+                f"{region}.amazonaws.com"
             )
             self.assert_endpoint(request, expected_endpoint)
 
@@ -1401,30 +1519,84 @@ class TestS3SigV4(BaseS3OperationTest):
     def get_sent_headers(self):
         return self.http_stubber.requests[0].headers
 
-    def test_content_md5_set(self):
+    def test_trailing_checksum_set(self):
         with self.http_stubber:
             self.client.put_object(Bucket="foo", Key="bar", Body="baz")
-        self.assertIn("content-md5", self.get_sent_headers())
+        sent_headers = self.get_sent_headers()
+        self.assertEqual(sent_headers["Content-Encoding"], b"aws-chunked")
+        self.assertEqual(sent_headers["Transfer-Encoding"], b"chunked")
+        self.assertEqual(
+            sent_headers["X-Amz-Trailer"], b"x-amz-checksum-crc32"
+        )
+        self.assertEqual(sent_headers["X-Amz-Decoded-Content-Length"], b"3")
+        self.assertEqual(
+            sent_headers["x-amz-content-sha256"],
+            b"STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+        )
+        body = self.http_stubber.requests[0].body.read()
+        self.assertIn(b"x-amz-checksum-crc32:eCQEmA==", body)
 
-    def test_content_md5_set_empty_body(self):
+    def test_trailing_checksum_set_empty_body(self):
         with self.http_stubber:
             self.client.put_object(Bucket="foo", Key="bar", Body="")
-        self.assertIn("content-md5", self.get_sent_headers())
+        sent_headers = self.get_sent_headers()
+        self.assertEqual(sent_headers["Content-Encoding"], b"aws-chunked")
+        self.assertEqual(sent_headers["Transfer-Encoding"], b"chunked")
+        self.assertEqual(
+            sent_headers["X-Amz-Trailer"], b"x-amz-checksum-crc32"
+        )
+        self.assertEqual(sent_headers["X-Amz-Decoded-Content-Length"], b"0")
+        self.assertEqual(
+            sent_headers["x-amz-content-sha256"],
+            b"STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+        )
+        body = self.http_stubber.requests[0].body.read()
+        self.assertIn(b"x-amz-checksum-crc32:AAAAAA==", body)
 
-    def test_content_md5_set_empty_file(self):
+    def test_trailing_checksum_set_empty_file(self):
         with self.http_stubber:
             with temporary_file("rb") as f:
                 assert f.read() == b""
                 self.client.put_object(Bucket="foo", Key="bar", Body=f)
-        self.assertIn("content-md5", self.get_sent_headers())
+                body = self.http_stubber.requests[0].body.read()
+        sent_headers = self.get_sent_headers()
+        self.assertEqual(sent_headers["Content-Encoding"], b"aws-chunked")
+        self.assertEqual(sent_headers["Transfer-Encoding"], b"chunked")
+        self.assertEqual(
+            sent_headers["X-Amz-Trailer"], b"x-amz-checksum-crc32"
+        )
+        self.assertEqual(sent_headers["X-Amz-Decoded-Content-Length"], b"0")
+        self.assertEqual(
+            sent_headers["x-amz-content-sha256"],
+            b"STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+        )
+        self.assertIn(b"x-amz-checksum-crc32:AAAAAA==", body)
 
-    def test_content_sha256_set_if_config_value_is_true(self):
-        # By default, put_object() does not include an x-amz-content-sha256
-        # header because it also includes a `Content-MD5` header. The
-        # `payload_signing_enabled` config overrides this logic and forces the
-        # header.
+    def test_content_sha256_set_for_unsigned_request(self):
         config = Config(
-            signature_version="s3v4", s3={"payload_signing_enabled": True}
+            signature_version=UNSIGNED,
+        )
+        self.client = self.session.create_client(
+            "s3", self.region, config=config
+        )
+        self.http_stubber = ClientHTTPStubber(self.client)
+        self.http_stubber.add_response()
+        with self.http_stubber:
+            self.client.put_object(
+                Bucket="foo", Key="bar", Body="baz", ChecksumAlgorithm="CRC32"
+            )
+        sent_headers = self.get_sent_headers()
+        sha_header = sent_headers.get("x-amz-content-sha256")
+        self.assertEqual(sha_header, b"STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+
+    def test_content_sha256_not_set_if_config_value_is_true(self):
+        # By default, put_object() provides a trailing checksum and includes the
+        # x-amz-content-sha256 header with a value of "STREAMING-UNSIGNED-PAYLOAD-TRAILER".
+        # We do not support payload signing for streaming so the `payload_signing_enabled`
+        # config has no effect here.
+        config = Config(
+            signature_version="s3v4",
+            s3={"payload_signing_enabled": True},
         )
         self.client = self.session.create_client(
             "s3", self.region, config=config
@@ -1435,11 +1607,16 @@ class TestS3SigV4(BaseS3OperationTest):
             self.client.put_object(Bucket="foo", Key="bar", Body="baz")
         sent_headers = self.get_sent_headers()
         sha_header = sent_headers.get("x-amz-content-sha256")
-        self.assertNotEqual(sha_header, b"UNSIGNED-PAYLOAD")
+        self.assertEqual(sha_header, b"STREAMING-UNSIGNED-PAYLOAD-TRAILER")
 
     def test_content_sha256_not_set_if_config_value_is_false(self):
+        # By default, put_object() provides a trailing checksum and includes the
+        # x-amz-content-sha256 header with a value of "STREAMING-UNSIGNED-PAYLOAD-TRAILER".
+        # We do not support payload signing for streaming so the `payload_signing_enabled`
+        # config has no effect here.
         config = Config(
-            signature_version="s3v4", s3={"payload_signing_enabled": False}
+            signature_version="s3v4",
+            s3={"payload_signing_enabled": False},
         )
         self.client = self.session.create_client(
             "s3", self.region, config=config
@@ -1450,15 +1627,18 @@ class TestS3SigV4(BaseS3OperationTest):
             self.client.put_object(Bucket="foo", Key="bar", Body="baz")
         sent_headers = self.get_sent_headers()
         sha_header = sent_headers.get("x-amz-content-sha256")
-        self.assertEqual(sha_header, b"UNSIGNED-PAYLOAD")
+        self.assertEqual(sha_header, b"STREAMING-UNSIGNED-PAYLOAD-TRAILER")
 
-    def test_content_sha256_set_if_config_value_not_set_put_object(self):
-        # The default behavior matches payload_signing_enabled=False. For
-        # operations where the `Content-MD5` is present this means that
-        # `x-amz-content-sha256` is present but not set.
+    def test_content_sha256_not_set_if_config_value_not_set_put_object(self):
+        # By default, put_object() provides a trailing checksum and includes the
+        # x-amz-content-sha256 header with a value of "STREAMING-UNSIGNED-PAYLOAD-TRAILER".
+        # We do not support payload signing for streaming so the `payload_signing_enabled`
+        # config has no effect here.
         config = Config(signature_version="s3v4")
         self.client = self.session.create_client(
-            "s3", self.region, config=config
+            "s3",
+            self.region,
+            config=config,
         )
         self.http_stubber = ClientHTTPStubber(self.client)
         self.http_stubber.add_response()
@@ -1466,7 +1646,7 @@ class TestS3SigV4(BaseS3OperationTest):
             self.client.put_object(Bucket="foo", Key="bar", Body="baz")
         sent_headers = self.get_sent_headers()
         sha_header = sent_headers.get("x-amz-content-sha256")
-        self.assertEqual(sha_header, b"UNSIGNED-PAYLOAD")
+        self.assertEqual(sha_header, b"STREAMING-UNSIGNED-PAYLOAD-TRAILER")
 
     def test_content_sha256_set_if_config_value_not_set_list_objects(self):
         # The default behavior matches payload_signing_enabled=False. For
@@ -1501,16 +1681,6 @@ class TestS3SigV4(BaseS3OperationTest):
         sent_headers = self.get_sent_headers()
         sha_header = sent_headers.get("x-amz-content-sha256")
         self.assertNotEqual(sha_header, b"UNSIGNED-PAYLOAD")
-
-    def test_content_sha256_set_if_md5_is_unavailable(self):
-        with mock.patch("botocore.compat.MD5_AVAILABLE", False):
-            with mock.patch("botocore.utils.MD5_AVAILABLE", False):
-                with self.http_stubber:
-                    self.client.put_object(Bucket="foo", Key="bar", Body="baz")
-        sent_headers = self.get_sent_headers()
-        unsigned = "UNSIGNED-PAYLOAD"
-        self.assertNotEqual(sent_headers["x-amz-content-sha256"], unsigned)
-        self.assertNotIn("content-md5", sent_headers)
 
 
 class TestCanSendIntegerHeaders(BaseSessionTest):
@@ -2147,7 +2317,7 @@ def test_checksums_included_in_expected_operations(
         stub.add_response()
         call = getattr(client, operation)
         call(**operation_kwargs)
-        assert "Content-MD5" in stub.requests[-1].headers
+        assert "x-amz-checksum-crc32" in stub.requests[-1].headers
 
 
 @pytest.mark.parametrize(
@@ -2970,7 +3140,7 @@ def _s3_addressing_test_cases():
         region="us-west-2",
         bucket=accesspoint_arn,
         key="key",
-        s3_config={"adressing_style": "auto"},
+        s3_config={"addressing_style": "auto"},
         expected_url=(
             "https://myendpoint-123456789012.s3-accesspoint."
             "us-west-2.amazonaws.com/key"
@@ -2980,7 +3150,7 @@ def _s3_addressing_test_cases():
         region="us-west-2",
         bucket=accesspoint_arn,
         key="key",
-        s3_config={"adressing_style": "virtual"},
+        s3_config={"addressing_style": "virtual"},
         expected_url=(
             "https://myendpoint-123456789012.s3-accesspoint."
             "us-west-2.amazonaws.com/key"
@@ -2990,7 +3160,7 @@ def _s3_addressing_test_cases():
         region="us-west-2",
         bucket=accesspoint_arn,
         key="key",
-        s3_config={"adressing_style": "path"},
+        s3_config={"addressing_style": "path"},
         expected_url=(
             "https://myendpoint-123456789012.s3-accesspoint."
             "us-west-2.amazonaws.com/key"
@@ -3506,6 +3676,46 @@ def _addressing_for_presigned_url_test_cases():
         expected_url="https://s3.us-west-2.amazonaws.com/foo.b.biz/key",
     )
 
+    # virtual style addressing expicitly requested always uses
+    # regional endpoints except for us-east-1 and aws-global
+    yield dict(
+        region="us-west-2",
+        bucket="bucket",
+        key="key",
+        signature_version="s3",
+        s3_config={"addressing_style": "virtual"},
+        expected_url="https://bucket.s3.us-west-2.amazonaws.com/key",
+    )
+    yield dict(
+        region="us-east-2",
+        bucket="bucket",
+        key="key",
+        signature_version="s3v4",
+        s3_config={"addressing_style": "virtual"},
+        expected_url="https://bucket.s3.us-east-2.amazonaws.com/key",
+    )
+    yield dict(
+        region="us-west-2",
+        bucket="bucket",
+        key="key",
+        s3_config={"addressing_style": "virtual"},
+        expected_url="https://bucket.s3.us-west-2.amazonaws.com/key",
+    )
+    yield dict(
+        region="us-east-1",
+        bucket="bucket",
+        key="key",
+        s3_config={"addressing_style": "virtual"},
+        expected_url="https://bucket.s3.amazonaws.com/key",
+    )
+    yield dict(
+        region="aws-global",
+        bucket="bucket",
+        key="key",
+        s3_config={"addressing_style": "virtual"},
+        expected_url="https://bucket.s3.amazonaws.com/key",
+    )
+
 
 @pytest.mark.parametrize(
     "test_case", _addressing_for_presigned_url_test_cases()
@@ -3539,15 +3749,17 @@ def _verify_presigned_url_addressing(
     # We're not trying to verify the params for URL presigning,
     # those are tested elsewhere.  We just care about the hostname/path.
     parts = urlsplit(url)
-    actual = "%s://%s%s" % parts[:3]
+    actual = "{}://{}{}".format(*parts[:3])
     assert actual == expected_url
 
 
 class TestS3XMLPayloadEscape(BaseS3OperationTest):
-    def assert_correct_content_md5(self, request):
-        content_md5_bytes = get_md5(request.body).digest()
-        content_md5 = base64.b64encode(content_md5_bytes)
-        self.assertEqual(content_md5, request.headers["Content-MD5"])
+    def assert_correct_crc32_checksum(self, request):
+        checksum = get_checksum_cls()()
+        crc32_checksum = checksum.handle(request.body).encode()
+        self.assertEqual(
+            crc32_checksum, request.headers["x-amz-checksum-crc32"]
+        )
 
     def test_escape_keys_in_xml_delete_objects(self):
         self.http_stubber.add_response()
@@ -3559,7 +3771,7 @@ class TestS3XMLPayloadEscape(BaseS3OperationTest):
         request = self.http_stubber.requests[0]
         self.assertNotIn(b"\r\n\r", request.body)
         self.assertIn(b"&#xD;&#xA;&#xD;", request.body)
-        self.assert_correct_content_md5(request)
+        self.assert_correct_crc32_checksum(request)
 
     def test_escape_keys_in_xml_put_bucket_lifecycle_configuration(self):
         self.http_stubber.add_response()
@@ -3578,4 +3790,95 @@ class TestS3XMLPayloadEscape(BaseS3OperationTest):
         request = self.http_stubber.requests[0]
         self.assertNotIn(b"my\r\n\rprefix", request.body)
         self.assertIn(b"my&#xD;&#xA;&#xD;prefix", request.body)
-        self.assert_correct_content_md5(request)
+        self.assert_correct_crc32_checksum(request)
+
+
+class TestExpectContinueBehavior(BaseSessionTest):
+    def test_sets_100_continute_with_body(self):
+        op_kwargs = {
+            "Bucket": "mybucket",
+            "Key": "mykey",
+            "Body": b"foo",
+        }
+        s3 = _create_s3_client()
+        with ClientHTTPStubber(s3) as http_stubber:
+            http_stubber.add_response()
+            s3.put_object(**op_kwargs)
+            expect_header = http_stubber.requests[-1].headers.get("Expect")
+            self.assertIsNotNone(expect_header)
+            self.assertEqual(expect_header, b"100-continue")
+
+    def test_does_not_set_100_continute_with_empty_body(self):
+        environ = {'BOTO_EXPERIMENTAL__NO_EMPTY_CONTINUE': "True"}
+        self.environ_patch = mock.patch('os.environ', environ)
+        self.environ_patch.start()
+        op_kwargs = {"Bucket": "mybucket", "Key": "mykey", "Body": ""}
+        s3 = _create_s3_client()
+        with ClientHTTPStubber(s3) as http_stubber:
+            http_stubber.add_response()
+            s3.put_object(**op_kwargs)
+            expect_header = http_stubber.requests[-1].headers.get("Expect")
+            self.assertIsNone(expect_header)
+
+
+class TestParameterInjection(BaseS3OperationTest):
+    BUCKET = "foo"
+    KEY = "bar"
+
+    def test_parameter_injection(self):
+        self.http_stubber.add_response()
+        self.client.meta.events.register(
+            'before-sign.s3', self._verify_bucket_and_key_in_context
+        )
+        with self.http_stubber:
+            self.client.put_object(
+                Bucket=self.BUCKET,
+                Key=self.KEY,
+            )
+
+    def _verify_bucket_and_key_in_context(self, request, **kwargs):
+        self.assertEqual(
+            request.context['input_params']['Bucket'], self.BUCKET
+        )
+        self.assertEqual(request.context['input_params']['Key'], self.KEY)
+
+
+@pytest.mark.parametrize(
+    "bucket, key, expected_path, expected_hostname",
+    [
+        (
+            "mybucket",
+            "../key.txt",
+            "/../key.txt",
+            "mybucket.s3.us-west-2.amazonaws.com",
+        ),
+        (
+            "mybucket",
+            "foo/../key.txt",
+            "/foo/../key.txt",
+            "mybucket.s3.us-west-2.amazonaws.com",
+        ),
+        (
+            "mybucket",
+            "foo/../../key.txt",
+            "/foo/../../key.txt",
+            "mybucket.s3.us-west-2.amazonaws.com",
+        ),
+    ],
+)
+def test_dot_segments_preserved_in_url_path(
+    patched_session, bucket, key, expected_path, expected_hostname
+):
+    s3 = patched_session.create_client(
+        's3',
+        'us-west-2',
+        config=Config(
+            s3={"addressing_style": "virtual"},
+        ),
+    )
+    with ClientHTTPStubber(s3) as http_stubber:
+        http_stubber.add_response()
+        s3.get_object(Bucket=bucket, Key=key)
+        url_parts = urlsplit(http_stubber.requests[0].url)
+        assert url_parts.path == expected_path
+        assert url_parts.hostname == expected_hostname

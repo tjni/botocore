@@ -429,16 +429,17 @@ class TestTaggedUnions(unittest.TestCase):
         expected_parsed_response,
         expected_log,
     ):
+        warning_message = (
+            'Received a tagged union response with member unknown to client'
+        )
         with self.assertLogs() as captured_log:
             parsed = parser.parse(response, output_shape)
             self.assertEqual(parsed, expected_parsed_response)
-            self.assertEqual(len(captured_log.records), 1)
-            self.assertIn(
-                (
-                    'Received a tagged union response with member '
-                    'unknown to client'
-                ),
-                captured_log.records[0].getMessage(),
+            log_messages = [
+                record.getMessage() for record in captured_log.records
+            ]
+            self.assertTrue(
+                any(warning_message in log for log in log_messages)
             )
 
     def test_base_json_parser_handles_unknown_member(self):
@@ -552,6 +553,35 @@ class TestTaggedUnions(unittest.TestCase):
         response = {'body': response, 'headers': headers, 'status_code': 200}
         with self.assertRaises(parsers.ResponseParserError):
             parser.parse(response, output_shape)
+
+    def test_parser_accepts_type_metadata_with_union(self):
+        parser = parsers.JSONParser()
+        response = b'{"Foo": "mystring", "__type": "mytype"}'
+        headers = {'x-amzn-requestid': 'request-id'}
+        output_shape = model.StructureShape(
+            'OutputShape',
+            {
+                'type': 'structure',
+                'union': True,
+                'members': {
+                    'Foo': {
+                        'shape': 'StringType',
+                    },
+                    'Bar': {
+                        'shape': 'StringType',
+                    },
+                },
+            },
+            model.ShapeResolver({'StringType': {'type': 'string'}}),
+        )
+
+        response = {
+            'body': response,
+            'headers': headers,
+            'status_code': 200,
+        }
+        parsed = parser.parse(response, output_shape)
+        self.assertEqual(parsed['Foo'], 'mystring')
 
 
 class TestHeaderResponseInclusion(unittest.TestCase):
@@ -1104,6 +1134,9 @@ class TestParseErrorResponses(unittest.TestCase):
         self.assertEqual(
             parsed['Error']['Code'], 'AWS.SimpleQueueService.NonExistentQueue'
         )
+        self.assertEqual(
+            parsed['Error']['QueryErrorCode'], "ValidationException"
+        )
         self.assertEqual(parsed['Error']['Type'], 'Sender')
 
     def test_response_with_invalid_query_error_for_json_protocol(self):
@@ -1126,6 +1159,7 @@ class TestParseErrorResponses(unittest.TestCase):
         self.assertIn('Error', parsed)
         self.assertEqual(parsed['Error']['Message'], 'this is a message')
         self.assertEqual(parsed['Error']['Code'], 'ValidationException')
+        self.assertNotIn('QueryErrorCode', parsed['Error'])
         self.assertNotIn('Type', parsed['Error'])
 
     def test_response_with_incomplete_query_error_for_json_protocol(self):
@@ -1148,6 +1182,7 @@ class TestParseErrorResponses(unittest.TestCase):
         self.assertIn('Error', parsed)
         self.assertEqual(parsed['Error']['Message'], 'this is a message')
         self.assertEqual(parsed['Error']['Code'], 'ValidationException')
+        self.assertNotIn('QueryErrorCode', parsed['Error'])
         self.assertNotIn('Type', parsed['Error'])
 
     def test_response_with_empty_query_errors_for_json_protocol(self):
@@ -1170,6 +1205,7 @@ class TestParseErrorResponses(unittest.TestCase):
         self.assertIn('Error', parsed)
         self.assertEqual(parsed['Error']['Message'], 'this is a message')
         self.assertEqual(parsed['Error']['Code'], 'ValidationException')
+        self.assertNotIn('QueryErrorCode', parsed['Error'])
         self.assertNotIn('Type', parsed['Error'])
 
     def test_parse_error_response_for_query_protocol(self):

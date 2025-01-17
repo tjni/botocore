@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -48,7 +49,14 @@ from botocore.utils import (
     SSOTokenLoader,
     datetime2timestamp,
 )
-from tests import BaseEnvVar, IntegerRefresher, mock, skip_if_windows, unittest
+from tests import (
+    BaseEnvVar,
+    IntegerRefresher,
+    mock,
+    skip_if_windows,
+    temporary_file,
+    unittest,
+)
 
 # Passed to session to keep it from finding default config file
 TESTENVVARS = {'config_file': (None, 'AWS_CONFIG_FILE', None)}
@@ -2103,9 +2111,9 @@ class TestAssumeRoleCredentialProvider(unittest.TestCase):
             },
         }
         cache = {}
-        self.fake_config['profiles']['development'][
-            'role_arn'
-        ] = 'arn:aws:iam::foo-role'
+        self.fake_config['profiles']['development']['role_arn'] = (
+            'arn:aws:iam::foo-role'
+        )
 
         client_creator = self.create_client_creator(with_response=response)
         provider = credentials.AssumeRoleProvider(
@@ -2132,12 +2140,12 @@ class TestAssumeRoleCredentialProvider(unittest.TestCase):
             },
         }
         cache = {}
-        self.fake_config['profiles']['development'][
-            'role_arn'
-        ] = 'arn:aws:iam::foo-role'
-        self.fake_config['profiles']['development'][
-            'role_session_name'
-        ] = 'foo_role_session_name'
+        self.fake_config['profiles']['development']['role_arn'] = (
+            'arn:aws:iam::foo-role'
+        )
+        self.fake_config['profiles']['development']['role_session_name'] = (
+            'foo_role_session_name'
+        )
 
         client_creator = self.create_client_creator(with_response=response)
         provider = credentials.AssumeRoleProvider(
@@ -2269,9 +2277,9 @@ class TestAssumeRoleCredentialProvider(unittest.TestCase):
         )
 
     def test_assume_role_with_bad_duration(self):
-        self.fake_config['profiles']['development'][
-            'duration_seconds'
-        ] = 'garbage value'
+        self.fake_config['profiles']['development']['duration_seconds'] = (
+            'garbage value'
+        )
         response = {
             'Credentials': {
                 'AccessKeyId': 'foo',
@@ -2772,9 +2780,9 @@ class ProfileProvider:
 
     def load(self):
         return Credentials(
-            '%s-access-key' % self._profile_name,
-            '%s-secret-key' % self._profile_name,
-            '%s-token' % self._profile_name,
+            f'{self._profile_name}-access-key',
+            f'{self._profile_name}-secret-key',
+            f'{self._profile_name}-token',
             self.METHOD,
         )
 
@@ -2968,6 +2976,14 @@ class TestRefreshLogic(unittest.TestCase):
 
 
 class TestContainerProvider(BaseEnvVar):
+    def setUp(self):
+        super().setUp()
+        self.tempdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        super().tearDown()
+        shutil.rmtree(self.tempdir)
+
     def test_noop_if_env_var_is_not_set(self):
         # The 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI' env var
         # is not present as an env var.
@@ -3127,6 +3143,99 @@ class TestContainerProvider(BaseEnvVar):
         self.assertEqual(creds.secret_key, 'secret_key')
         self.assertEqual(creds.token, 'token')
         self.assertEqual(creds.method, 'container-role')
+
+    def test_can_pass_auth_token_from_file(self):
+        with temporary_file('w') as f:
+            f.write('Basic auth-token')
+            f.flush()
+            environ = {
+                'AWS_CONTAINER_CREDENTIALS_FULL_URI': 'http://localhost/foo',
+                'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE': f.name,
+            }
+            fetcher = self.create_fetcher()
+            timeobj = datetime.now(tzlocal())
+            timestamp = (timeobj + timedelta(hours=24)).isoformat()
+            fetcher.retrieve_full_uri.return_value = {
+                "AccessKeyId": "access_key",
+                "SecretAccessKey": "secret_key",
+                "Token": "token",
+                "Expiration": timestamp,
+            }
+            provider = credentials.ContainerProvider(environ, fetcher)
+            creds = provider.load()
+
+            fetcher.retrieve_full_uri.assert_called_with(
+                'http://localhost/foo',
+                headers={'Authorization': 'Basic auth-token'},
+            )
+            self.assertEqual(creds.access_key, 'access_key')
+            self.assertEqual(creds.secret_key, 'secret_key')
+            self.assertEqual(creds.token, 'token')
+            self.assertEqual(creds.method, 'container-role')
+
+    def test_reloads_auth_token_from_file(self):
+        with temporary_file('w') as f:
+            f.write('First auth token')
+            f.flush()
+            environ = {
+                'AWS_CONTAINER_CREDENTIALS_FULL_URI': 'http://localhost/foo',
+                'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE': f.name,
+            }
+            fetcher = self.create_fetcher()
+            timeobj = datetime.now(tzlocal())
+            fetcher.retrieve_full_uri.side_effect = [
+                {
+                    "AccessKeyId": "first_key",
+                    "SecretAccessKey": "first_secret",
+                    "Token": "first_token",
+                    "Expiration": (timeobj + timedelta(seconds=1)).isoformat(),
+                },
+                {
+                    "AccessKeyId": "second_key",
+                    "SecretAccessKey": "second_secret",
+                    "Token": "second_token",
+                    "Expiration": (timeobj + timedelta(minutes=5)).isoformat(),
+                },
+            ]
+            provider = credentials.ContainerProvider(environ, fetcher)
+            creds = provider.load()
+            fetcher.retrieve_full_uri.assert_called_with(
+                'http://localhost/foo',
+                headers={'Authorization': 'First auth token'},
+            )
+            time.sleep(1.5)
+            f.seek(0)
+            f.truncate()
+            f.write('Second auth token')
+            f.flush()
+            creds._refresh()
+            fetcher.retrieve_full_uri.assert_called_with(
+                'http://localhost/foo',
+                headers={'Authorization': 'Second auth token'},
+            )
+
+    def test_throws_error_on_invalid_token_file(self):
+        token_file_path = '/some/path/token.jwt'
+        environ = {
+            'AWS_CONTAINER_CREDENTIALS_FULL_URI': 'http://localhost/foo',
+            'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE': token_file_path,
+        }
+        fetcher = self.create_fetcher()
+        provider = credentials.ContainerProvider(environ, fetcher)
+
+        with self.assertRaises(FileNotFoundError):
+            provider.load()
+
+    def test_throws_error_on_illegal_header(self):
+        environ = {
+            'AWS_CONTAINER_CREDENTIALS_FULL_URI': 'http://localhost/foo',
+            'AWS_CONTAINER_AUTHORIZATION_TOKEN': 'invalid\r\ntoken',
+        }
+        fetcher = self.create_fetcher()
+        provider = credentials.ContainerProvider(environ, fetcher)
+
+        with self.assertRaises(ValueError):
+            provider.load()
 
 
 class TestProcessProvider(BaseEnvVar):

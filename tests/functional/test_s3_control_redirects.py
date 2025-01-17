@@ -22,7 +22,6 @@ from botocore.exceptions import (
     InvalidHostLabelError,
     ParamValidationError,
     UnsupportedS3ControlArnError,
-    UnsupportedS3ControlConfigurationError,
 )
 from botocore.session import Session
 from tests import ClientHTTPStubber, unittest
@@ -125,7 +124,12 @@ ACCESSPOINT_ARN_TEST_CASES = [
         'arn': 'arn:aws:s3-outposts:us-west-2:123456789012:outpost:op-01234567890123456:accesspoint:myaccesspoint',
         'config': {'s3': {'use_dualstack_endpoint': True}},
         'assertions': {
-            'exception': 'UnsupportedS3ControlConfigurationError',
+            'signing_name': 's3-outposts',
+            'netloc': 's3-outposts.us-west-2.api.aws',
+            'headers': {
+                'x-amz-outpost-id': 'op-01234567890123456',
+                'x-amz-account-id': '123456789012',
+            },
         },
     },
     {
@@ -252,7 +256,12 @@ BUCKET_ARN_TEST_CASES = [
         'region': 'us-west-2',
         'config': {'s3': {'use_dualstack_endpoint': True}},
         'assertions': {
-            'exception': 'UnsupportedS3ControlConfigurationError',
+            'signing_name': 's3-outposts',
+            'netloc': 's3-outposts.us-west-2.api.aws',
+            'headers': {
+                'x-amz-outpost-id': 'op-01234567890123456',
+                'x-amz-account-id': '123456789012',
+            },
         },
     },
     {
@@ -366,12 +375,9 @@ def _assert_test_case(test_case, client, stubber):
         exception_cls = getattr(exceptions, assertions['exception'])
         if exception_raised is None:
             raise RuntimeError(
-                'Expected exception "%s" was not raised' % exception_cls
+                f'Expected exception "{exception_cls}" was not raised'
             )
-        error_msg = ('Expected exception "%s", got "%s"') % (
-            exception_cls,
-            type(exception_raised),
-        )
+        error_msg = f'Expected exception "{exception_cls}", got "{type(exception_raised)}"'
         assert isinstance(exception_raised, exception_cls), error_msg
     else:
         assert len(stubber.requests) == 1
@@ -399,8 +405,11 @@ class TestS3ControlRedirection(unittest.TestCase):
     def test_outpost_id_redirection_dualstack(self):
         config = Config(s3={'use_dualstack_endpoint': True})
         self._bootstrap_client(config=config)
-        with self.assertRaises(UnsupportedS3ControlConfigurationError):
+        self.stubber.add_response()
+        with self.stubber:
             self.client.create_bucket(Bucket='foo', OutpostId='op-123')
+        _assert_netloc(self.stubber, 's3-outposts.us-west-2.api.aws')
+        _assert_header(self.stubber, 'x-amz-outpost-id', 'op-123')
 
     def test_outpost_id_redirection_create_bucket(self):
         self.stubber.add_response()

@@ -115,10 +115,10 @@ class Config:
 
           * ``virtual`` -- Addressing style is always virtual. The name of the
             bucket must be DNS compatible or an exception will be thrown.
-            Endpoints will be addressed as such: ``mybucket.s3.amazonaws.com``
+            Endpoints will be addressed as such: ``amzn-s3-demo-bucket.s3.amazonaws.com``
 
           * ``path`` -- Addressing style is always by path. Endpoints will be
-            addressed as such: ``s3.amazonaws.com/mybucket``
+            addressed as such: ``s3.amazonaws.com/amzn-s3-demo-bucket``
 
         * ``us_east_1_regional_endpoint`` -- Refers to what S3 endpoint to use
           when the region is configured to be us-east-1. Values must be a
@@ -206,6 +206,66 @@ class Config:
         creating new connections if set to True.
 
         Defaults to False.
+
+    :type request_min_compression_size_bytes: int
+    :param request_min_compression_size_bytes: The minimum size in bytes that a
+        request body should be to trigger compression. All requests with
+        streaming input that don't contain the ``requiresLength`` trait will be
+        compressed regardless of this setting.
+
+        Defaults to None.
+
+    :type disable_request_compression: bool
+    :param disable_request_compression: Disables request body compression if
+        set to True.
+
+        Defaults to None.
+
+    :type sigv4a_signing_region_set: string
+    :param sigv4a_signing_region_set: A set of AWS regions to apply the signature for
+        when using SigV4a for signing. Set to ``*`` to represent all regions.
+
+        Defaults to None.
+
+    :type client_context_params: dict
+    :param client_context_params: A dictionary of parameters specific to
+        individual services. If available, valid parameters can be found in
+        the ``Client Context Parameters`` section of the service client's
+        documentation. Invalid parameters or ones that are not used by the
+        specified service will be ignored.
+
+        Defaults to None.
+
+    :type request_checksum_calculation: str
+    :param request_checksum_calculation: Determines when a checksum will be
+        calculated for request payloads. Valid values are:
+
+        * ``when_supported`` -- When set, a checksum will be calculated for
+          all request payloads of operations modeled with the ``httpChecksum``
+          trait where ``requestChecksumRequired`` is ``true`` or a
+          ``requestAlgorithmMember`` is modeled.
+
+        * ``when_required`` -- When set, a checksum will only be calculated
+          for request payloads of operations modeled with the ``httpChecksum``
+          trait where ``requestChecksumRequired`` is ``true`` or where a
+          ``requestAlgorithmMember`` is modeled and supplied.
+
+        Defaults to None.
+
+    :type response_checksum_validation: str
+    :param response_checksum_validation: Determines when checksum validation
+        will be performed on response payloads. Valid values are:
+
+        * ``when_supported`` -- When set, checksum validation is performed on
+          all response payloads of operations modeled with the ``httpChecksum``
+          trait where ``responseAlgorithms`` is modeled, except when no modeled
+          checksum algorithms are supported.
+
+        * ``when_required`` -- When set, checksum validation is not performed
+          on response payloads of operations unless the checksum algorithm is
+          supported and the ``requestValidationModeMember`` member is set to ``ENABLED``.
+
+        Defaults to None.
     """
 
     OPTION_DEFAULTS = OrderedDict(
@@ -231,6 +291,12 @@ class Config:
             ('ignore_configured_endpoint_urls', None),
             ('defaults_mode', None),
             ('tcp_keepalive', None),
+            ('request_min_compression_size_bytes', None),
+            ('disable_request_compression', None),
+            ('client_context_params', None),
+            ('sigv4a_signing_region_set', None),
+            ('request_checksum_calculation', None),
+            ('response_checksum_validation', None),
         ]
     )
 
@@ -284,7 +350,7 @@ class Config:
         # Iterate through the args passed through to the constructor and map
         # them to appropriate keys.
         for i, arg in enumerate(args):
-            # If it a kwarg was specified for the arg, then error out
+            # If a kwarg was specified for the arg, then error out
             if option_order[i] in user_provided_options:
                 raise TypeError(
                     f"Got multiple values for keyword argument '{option_order[i]}'"

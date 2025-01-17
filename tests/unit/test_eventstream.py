@@ -10,7 +10,8 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
-"""Unit tests for the binary event stream decoder. """
+"""Unit tests for the binary event stream decoder."""
+
 import pytest
 
 from botocore.eventstream import (
@@ -214,10 +215,10 @@ POSITIVE_CASES = [
 
 CORRUPTED_HEADER_LENGTH = (
     (
-        b"\x00\x00\x00=\xFF\x00\x01\x02\x07\xfd\x83\x96\x0ccontent-type\x07\x00"
+        b"\x00\x00\x00=\xff\x00\x01\x02\x07\xfd\x83\x96\x0ccontent-type\x07\x00"
         b"\x10application/json{'foo':'bar'}\x8d\x9c\x08\xb1"
     ),
-    InvalidHeadersLength,
+    ChecksumMismatch,
 )
 
 CORRUPTED_HEADERS = (
@@ -230,7 +231,7 @@ CORRUPTED_HEADERS = (
 
 CORRUPTED_LENGTH = (
     b"\x01\x00\x00\x1d\x00\x00\x00\x00\xfdR\x8cZ{'foo':'bar'}\xc3e96",
-    InvalidPayloadLength,
+    ChecksumMismatch,
 )
 
 CORRUPTED_PAYLOAD = (
@@ -246,6 +247,31 @@ DUPLICATE_HEADER = (
     DuplicateHeader,
 )
 
+# In contrast to the CORRUPTED_HEADERS case, this message is otherwise
+# well-formed - the checksums match.
+INVALID_HEADERS_LENGTH = (
+    (
+        b"\x00\x00\x00\x3d"  # total length
+        b"\xff\x00\x01\x02"  # headers length
+        b"\x15\x83\xf5\xc2"  # prelude crc
+        b"\x0ccontent-type\x07\x00\x10application/json"  # headers
+        b"{'foo':'bar'}"  # payload
+        b"\x2f\x37\x7f\x5d"  # message crc
+    ),
+    InvalidHeadersLength,
+)
+
+# In contrast to the CORRUPTED_PAYLOAD case, this message is otherwise
+# well-formed - the checksums match.
+INVALID_PAYLOAD_LENGTH = (
+    b"\x01\x00\x00\x11"  # total length
+    + b"\x00\x00\x00\x00"  # headers length
+    + b"\xf4\x08\x61\xc5"  # prelude crc
+    + b"0" * (16 * 1024**2 + 1)  # payload
+    + b"\x2a\xb4\xc5\xa5",  # message crc
+    InvalidPayloadLength,
+)
+
 # Tuples of encoded messages and their expected exception
 NEGATIVE_CASES = [
     CORRUPTED_LENGTH,
@@ -253,6 +279,8 @@ NEGATIVE_CASES = [
     CORRUPTED_HEADERS,
     CORRUPTED_HEADER_LENGTH,
     DUPLICATE_HEADER,
+    INVALID_HEADERS_LENGTH,
+    INVALID_PAYLOAD_LENGTH,
 ]
 
 
@@ -310,7 +338,19 @@ def test_all_positive_cases():
         assert_message_equal(expected, decoded)
 
 
-@pytest.mark.parametrize("encoded, exception", NEGATIVE_CASES)
+@pytest.mark.parametrize(
+    "encoded, exception",
+    NEGATIVE_CASES,
+    ids=[
+        "corrupted-length",
+        "corrupted-payload",
+        "corrupted-headers",
+        "corrupted-headers-length",
+        "duplicate-headers",
+        "invalid-headers-length",
+        "invalid-payload-length",
+    ],
+)
 def test_negative_cases(encoded, exception):
     """Test that all negative cases raise the expected exception."""
     with pytest.raises(exception):
@@ -375,37 +415,37 @@ def test_message_to_response_dict_error():
 
 
 def test_unpack_uint8():
-    (value, bytes_consumed) = DecodeUtils.unpack_uint8(b'\xDE')
+    (value, bytes_consumed) = DecodeUtils.unpack_uint8(b'\xde')
     assert bytes_consumed == 1
     assert value == 0xDE
 
 
 def test_unpack_uint32():
-    (value, bytes_consumed) = DecodeUtils.unpack_uint32(b'\xDE\xAD\xBE\xEF')
+    (value, bytes_consumed) = DecodeUtils.unpack_uint32(b'\xde\xad\xbe\xef')
     assert bytes_consumed == 4
     assert value == 0xDEADBEEF
 
 
 def test_unpack_int8():
-    (value, bytes_consumed) = DecodeUtils.unpack_int8(b'\xFE')
+    (value, bytes_consumed) = DecodeUtils.unpack_int8(b'\xfe')
     assert bytes_consumed == 1
     assert value == -2
 
 
 def test_unpack_int16():
-    (value, bytes_consumed) = DecodeUtils.unpack_int16(b'\xFF\xFE')
+    (value, bytes_consumed) = DecodeUtils.unpack_int16(b'\xff\xfe')
     assert bytes_consumed == 2
     assert value == -2
 
 
 def test_unpack_int32():
-    (value, bytes_consumed) = DecodeUtils.unpack_int32(b'\xFF\xFF\xFF\xFE')
+    (value, bytes_consumed) = DecodeUtils.unpack_int32(b'\xff\xff\xff\xfe')
     assert bytes_consumed == 4
     assert value == -2
 
 
 def test_unpack_int64():
-    test_bytes = b'\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFE'
+    test_bytes = b'\xff\xff\xff\xff\xff\xff\xff\xfe'
     (value, bytes_consumed) = DecodeUtils.unpack_int64(test_bytes)
     assert bytes_consumed == 8
     assert value == -2

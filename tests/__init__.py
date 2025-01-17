@@ -35,6 +35,8 @@ import botocore.session
 from botocore import credentials, utils
 from botocore.awsrequest import AWSResponse
 from botocore.compat import HAS_CRT, parse_qs, urlparse
+from botocore.configprovider import create_botocore_default_config_mapping
+from botocore.httpchecksum import _CHECKSUM_CLS, DEFAULT_CHECKSUM_ALGORITHM
 from botocore.stub import Stubber
 
 _LOADER = botocore.loaders.Loader()
@@ -108,6 +110,11 @@ def create_session(**kwargs):
     return session
 
 
+def get_botocore_default_config_mapping():
+    session = botocore.session.get_session()
+    return create_botocore_default_config_mapping(session)
+
+
 @contextlib.contextmanager
 def temporary_file(mode):
     """This is a cross platform temporary file creation.
@@ -121,9 +128,7 @@ def temporary_file(mode):
 
     """
     temporary_directory = tempfile.mkdtemp()
-    basename = 'tmpfile-{}-{}'.format(
-        int(time.time()), random.randint(1, 1000)
-    )
+    basename = f'tmpfile-{int(time.time())}-{random.randint(1, 1000)}'
     full_filename = os.path.join(temporary_directory, basename)
     open(full_filename, 'w').close()
     try:
@@ -523,8 +528,9 @@ class ConsistencyWaiter:
         raise ConsistencyWaiterException(fail_msg)
 
     def _fail_message(self, attempts, successes):
-        format_args = (attempts, successes)
-        return 'Failed after %s attempts, only had %s successes' % format_args
+        return (
+            f'Failed after {attempts} attempts, only had {successes} successes'
+        )
 
 
 class StubbedSession(botocore.session.Session):
@@ -598,3 +604,14 @@ def patch_load_service_model(
 
     loader = session.get_component('data_loader')
     monkeypatch.setattr(loader, 'load_service_model', mock_load_service_model)
+
+
+def get_checksum_cls(algorithm=DEFAULT_CHECKSUM_ALGORITHM.lower()):
+    """
+    This pass through is grabbing our internally supported list of checksums
+    to ensure we stay in sync, while not exposing them publicly.
+
+    Returns a checksum algorithm class. The default checksum class is used
+    if one isn't specified.
+    """
+    return _CHECKSUM_CLS[algorithm]

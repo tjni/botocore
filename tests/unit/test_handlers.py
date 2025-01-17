@@ -15,6 +15,7 @@ import base64
 import copy
 import io
 import json
+import logging
 import os
 
 import pytest
@@ -767,7 +768,7 @@ class TestHandlers(BaseSessionTest):
         request = AWSRequest()
         url = 'https://machinelearning.us-east-1.amazonaws.com'
         new_endpoint = 'https://my-custom-endpoint.amazonaws.com'
-        data = '{"PredictEndpoint":"%s"}' % new_endpoint
+        data = f'{{"PredictEndpoint":"{new_endpoint}"}}'
         request.data = data.encode('utf-8')
         request.url = url
         handlers.switch_host_with_param(request, 'PredictEndpoint')
@@ -822,7 +823,7 @@ class TestHandlers(BaseSessionTest):
             arn = 'arn:aws:s3:us-west-2:123456789012:accesspoint:endpoint'
             handlers.validate_bucket_name({'Bucket': arn})
         except ParamValidationError:
-            self.fail('The s3 arn: %s should pass validation' % arn)
+            self.fail(f'The s3 arn: {arn} should pass validation')
 
     def test_validation_is_s3_outpost_arn(self):
         try:
@@ -832,7 +833,7 @@ class TestHandlers(BaseSessionTest):
             )
             handlers.validate_bucket_name({'Bucket': arn})
         except ParamValidationError:
-            self.fail('The s3 arn: %s should pass validation' % arn)
+            self.fail(f'The s3 arn: {arn} should pass validation')
 
     def test_validation_is_global_s3_bucket_arn(self):
         with self.assertRaises(ParamValidationError):
@@ -1036,13 +1037,11 @@ class TestHandlers(BaseSessionTest):
         signing_name = 'myservice'
         context = {
             'auth_type': 'v4a',
-            'signing': {'foo': 'bar', 'region': 'abc'},
+            'signing': {'foo': 'bar'},
         }
         handlers.set_operation_specific_signer(
             context=context, signing_name=signing_name
         )
-        # region has been updated
-        self.assertEqual(context['signing']['region'], '*')
         # signing_name has been added
         self.assertEqual(context['signing']['signing_name'], signing_name)
         # foo remained untouched
@@ -1072,6 +1071,61 @@ class TestHandlers(BaseSessionTest):
         )
         self.assertEqual(response, 's3v4')
         self.assertEqual(context.get('payload_signing_enabled'), False)
+
+    def test_set_operation_specific_signer_defaults_to_asterisk(self):
+        signing_name = 'myservice'
+        context = {
+            'auth_type': 'v4a',
+        }
+        handlers.set_operation_specific_signer(
+            context=context, signing_name=signing_name
+        )
+        self.assertEqual(context['signing']['region'], '*')
+
+    def test_set_operation_specific_signer_prefers_client_config(self):
+        signing_name = 'myservice'
+        context = {
+            'auth_type': 'v4a',
+            'client_config': Config(
+                sigv4a_signing_region_set="region_1,region_2"
+            ),
+            'signing': {
+                'region': 'abc',
+            },
+        }
+        handlers.set_operation_specific_signer(
+            context=context, signing_name=signing_name
+        )
+        self.assertEqual(context['signing']['region'], 'region_1,region_2')
+
+    def test_payload_signing_disabled_sets_proper_key(self):
+        signing_name = 'myservice'
+        context = {
+            'auth_type': 'v4',
+            'signing': {
+                'foo': 'bar',
+                'region': 'abc',
+            },
+            'unsigned_payload': True,
+        }
+        handlers.set_operation_specific_signer(
+            context=context, signing_name=signing_name
+        )
+        self.assertEqual(context.get('payload_signing_enabled'), False)
+
+    def test_no_payload_signing_disabled_does_not_set_key(self):
+        signing_name = 'myservice'
+        context = {
+            'auth_type': 'v4',
+            'signing': {
+                'foo': 'bar',
+                'region': 'abc',
+            },
+        }
+        handlers.set_operation_specific_signer(
+            context=context, signing_name=signing_name
+        )
+        self.assertNotIn('payload_signing_enabled', context)
 
 
 @pytest.mark.parametrize(
@@ -1148,14 +1202,14 @@ class TestRetryHandlerOrder(BaseSessionTest):
             caught_exception=None,
         )
         # This is implementation specific, but we're trying to verify that
-        # the check_for_200_error is before any of the retry logic in
+        # the _update_status_code is before any of the retry logic in
         # botocore.retryhandlers.
         # Technically, as long as the relative order is preserved, we don't
         # care about the absolute order.
         names = self.get_handler_names(responses)
-        self.assertIn('check_for_200_error', names)
+        self.assertIn('_update_status_code', names)
         self.assertIn('RetryHandler', names)
-        s3_200_handler = names.index('check_for_200_error')
+        s3_200_handler = names.index('_update_status_code')
         general_retry_handler = names.index('RetryHandler')
         self.assertTrue(
             s3_200_handler < general_retry_handler,
@@ -1213,7 +1267,7 @@ class TestSSEMD5(BaseMD5Test):
             'UploadPartCopy',
             'SelectObjectContent',
         ):
-            event = 'before-parameter-build.s3.%s' % op
+            event = f'before-parameter-build.s3.{op}'
             params = {
                 'SSECustomerKey': b'bar',
                 'SSECustomerAlgorithm': 'AES256',
@@ -1235,7 +1289,7 @@ class TestSSEMD5(BaseMD5Test):
 
     def test_copy_source_sse_params(self):
         for op in ['CopyObject', 'UploadPartCopy']:
-            event = 'before-parameter-build.s3.%s' % op
+            event = f'before-parameter-build.s3.{op}'
             params = {
                 'CopySourceSSECustomerKey': b'bar',
                 'CopySourceSSECustomerAlgorithm': 'AES256',
@@ -1619,10 +1673,10 @@ class TestPrependToHost(unittest.TestCase):
         (
             {
                 'AWS_LAMBDA_FUNCTION_NAME': 'foo',
-                '_X_AMZN_TRACE_ID': 'test123-=;:+&[]{}\"\'',
+                '_X_AMZN_TRACE_ID': 'test123-=;:+&[]{}"\'',
             },
             {},
-            {'X-Amzn-Trace-Id': 'test123-=;:+&[]{}\"\''},
+            {'X-Amzn-Trace-Id': 'test123-=;:+&[]{}"\''},
         ),
     ],
 )
@@ -1727,3 +1781,236 @@ def test_remove_bucket_from_url_paths_from_model(
     )
     assert model.http['requestUri'] == request_uri_after
     assert model.http['authPath'] == auth_path
+
+
+@pytest.fixture()
+def operation_model_mock():
+    operation_model = mock.Mock()
+    operation_model.output_shape = mock.Mock()
+    operation_model.output_shape.members = {'Expires': mock.Mock()}
+    operation_model.output_shape.members['Expires'].name = 'Expires'
+    operation_model.output_shape.members['Expires'].serialization = {
+        'name': 'Expires'
+    }
+    return operation_model
+
+
+@pytest.mark.parametrize(
+    "expires, expect_expires_header",
+    [
+        # Valid expires values
+        ("Thu, 01 Jan 2015 00:00:00 GMT", True),
+        ("10/21/2018", True),
+        ("01 dec 2100", True),
+        ("2023-11-02 08:43:04 -0400", True),
+        ("Sun, 22 Oct 23 00:45:02 UTC", True),
+        # Invalid expires values
+        ("Invalid Date", False),
+        ("access plus 1 month", False),
+        ("Expires: Thu, 9 Sep 2013 14:19:41 GMT", False),
+        ("{ts '2023-10-10 09:27:14'}", False),
+        (-33702800404003370280040400, False),
+    ],
+)
+def test_handle_expires_header(
+    expires, expect_expires_header, operation_model_mock
+):
+    response_dict = {
+        'headers': {
+            'Expires': expires,
+        }
+    }
+    customized_response_dict = {}
+    handlers.handle_expires_header(
+        operation_model_mock, response_dict, customized_response_dict
+    )
+    assert customized_response_dict.get('ExpiresString') == expires
+    assert ('Expires' in response_dict['headers']) == expect_expires_header
+
+
+def test_handle_expires_header_logs_warning(operation_model_mock, caplog):
+    response_dict = {
+        'headers': {
+            'Expires': 'Invalid Date',
+        }
+    }
+    with caplog.at_level(logging.WARNING):
+        handlers.handle_expires_header(operation_model_mock, response_dict, {})
+    assert len(caplog.records) == 1
+    assert 'Failed to parse the "Expires" member as a timestamp' in caplog.text
+
+
+def test_handle_expires_header_does_not_log_warning(
+    operation_model_mock, caplog
+):
+    response_dict = {
+        'headers': {
+            'Expires': 'Thu, 01 Jan 2015 00:00:00 GMT',
+        }
+    }
+    with caplog.at_level(logging.WARNING):
+        handlers.handle_expires_header(operation_model_mock, response_dict, {})
+    assert len(caplog.records) == 0
+
+
+@pytest.fixture()
+def document_expires_mocks():
+    return {
+        'section': mock.Mock(),
+        'parent': mock.Mock(),
+        'param_line': mock.Mock(),
+        'param_section': mock.Mock(),
+        'doc_section': mock.Mock(),
+        'new_param_line': mock.Mock(),
+        'new_param_section': mock.Mock(),
+        'response_example_event': 'docs.response-example.s3.TestOperation.complete-section',
+        'response_params_event': 'docs.response-params.s3.TestOperation.complete-section',
+    }
+
+
+def test_document_response_example_with_expires(document_expires_mocks):
+    mocks = document_expires_mocks
+    mocks['section'].has_section.return_value = True
+    mocks['section'].get_section.return_value = mocks['parent']
+    mocks['parent'].has_section.return_value = True
+    mocks['parent'].get_section.return_value = mocks['param_line']
+    mocks['param_line'].has_section.return_value = True
+    mocks['param_line'].get_section.return_value = mocks['new_param_line']
+    handlers.document_expires_shape(
+        mocks['section'], mocks['response_example_event']
+    )
+    mocks['param_line'].add_new_section.assert_called_once_with(
+        'ExpiresString'
+    )
+    mocks['new_param_line'].write.assert_called_once_with(
+        "'ExpiresString': 'string',"
+    )
+    mocks['new_param_line'].style.new_line.assert_called_once()
+
+
+def test_document_response_example_without_expires(document_expires_mocks):
+    mocks = document_expires_mocks
+    mocks['section'].has_section.return_value = True
+    mocks['section'].get_section.return_value = mocks['parent']
+    mocks['parent'].has_section.return_value = False
+    handlers.document_expires_shape(
+        mocks['section'], mocks['response_example_event']
+    )
+    mocks['parent'].add_new_section.assert_not_called()
+    mocks['parent'].get_section.assert_not_called()
+    mocks['new_param_line'].write.assert_not_called()
+
+
+def test_document_response_params_with_expires(document_expires_mocks):
+    mocks = document_expires_mocks
+    mocks['section'].has_section.return_value = True
+    mocks['section'].get_section.return_value = mocks['param_section']
+    mocks['param_section'].get_section.side_effect = [
+        mocks['doc_section'],
+    ]
+    mocks['param_section'].add_new_section.side_effect = [
+        mocks['new_param_section'],
+    ]
+    mocks['doc_section'].style = mock.Mock()
+    mocks['new_param_section'].style = mock.Mock()
+    handlers.document_expires_shape(
+        mocks['section'], mocks['response_params_event']
+    )
+    mocks['param_section'].get_section.assert_any_call('param-documentation')
+    mocks['doc_section'].style.start_note.assert_called_once()
+    mocks['doc_section'].write.assert_called_once_with(
+        'This member has been deprecated. Please use ``ExpiresString`` instead.'
+    )
+    mocks['doc_section'].style.end_note.assert_called_once()
+    mocks['param_section'].add_new_section.assert_called_once_with(
+        'ExpiresString'
+    )
+    mocks['new_param_section'].style.new_paragraph.assert_any_call()
+    mocks['new_param_section'].write.assert_any_call(
+        '- **ExpiresString** *(string) --*'
+    )
+    mocks['new_param_section'].style.indent.assert_called_once()
+    mocks['new_param_section'].write.assert_any_call(
+        'The raw, unparsed value of the ``Expires`` field.'
+    )
+
+
+def test_document_response_params_without_expires(document_expires_mocks):
+    mocks = document_expires_mocks
+    mocks['section'].has_section.return_value = False
+    handlers.document_expires_shape(
+        mocks['section'], mocks['response_params_event']
+    )
+    mocks['section'].get_section.assert_not_called()
+    mocks['param_section'].add_new_section.assert_not_called()
+    mocks['doc_section'].write.assert_not_called()
+
+
+def test_add_query_compatibility_header():
+    service_model = ServiceModel({'metadata': {'awsQueryCompatible': {}}})
+    operation_model = OperationModel(mock.Mock(), service_model)
+    request_dict = {'headers': {}}
+    handlers.add_query_compatibility_header(operation_model, request_dict)
+    assert 'x-amzn-query-mode' in request_dict['headers']
+    assert request_dict['headers']['x-amzn-query-mode'] == 'true'
+
+
+def test_does_not_add_query_compatibility_header():
+    service_model = ServiceModel({'metadata': {}})
+    operation_model = OperationModel(mock.Mock(), service_model)
+    request_dict = {'headers': {}}
+    handlers.add_query_compatibility_header(operation_model, request_dict)
+    assert 'x-amzn-query-mode' not in request_dict['headers']
+
+
+@pytest.fixture()
+def checksum_operation_model():
+    operation_model = mock.Mock(spec=OperationModel)
+    operation_model.http_checksum = {
+        "requestValidationModeMember": "ChecksumMode",
+    }
+    return operation_model
+
+
+def create_checksum_context(
+    request_checksum_calculation="when_supported",
+    response_checksum_validation="when_supported",
+):
+    context = {
+        "client_config": Config(
+            request_checksum_calculation=request_checksum_calculation,
+            response_checksum_validation=response_checksum_validation,
+        )
+    }
+    return context
+
+
+def test_request_validation_mode_member_default(checksum_operation_model):
+    params = {}
+    handlers._handle_request_validation_mode_member(
+        params, checksum_operation_model, context=create_checksum_context()
+    )
+    assert params["ChecksumMode"] == "ENABLED"
+
+
+def test_request_validation_mode_member_when_required(
+    checksum_operation_model,
+):
+    params = {}
+    context = create_checksum_context(
+        response_checksum_validation="when_required"
+    )
+    handlers._handle_request_validation_mode_member(
+        params, checksum_operation_model, context=context
+    )
+    assert "ChecksumMode" not in params
+
+
+def test_request_validation_mode_member_set_by_user(
+    checksum_operation_model,
+):
+    params = {"ChecksumMode": "FAKE_VALUE"}
+    handlers._handle_request_validation_mode_member(
+        params, checksum_operation_model, context=create_checksum_context()
+    )
+    assert params["ChecksumMode"] == "FAKE_VALUE"

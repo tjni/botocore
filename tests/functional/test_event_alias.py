@@ -8,10 +8,6 @@ from botocore.session import Session
 SERVICES = {
     "acm": {"endpoint_prefix": "acm", "service_id": "acm"},
     "acm-pca": {"endpoint_prefix": "acm-pca", "service_id": "acm-pca"},
-    "alexaforbusiness": {
-        "endpoint_prefix": "a4b",
-        "service_id": "alexa-for-business",
-    },
     "apigateway": {
         "endpoint_prefix": "apigateway",
         "service_id": "api-gateway",
@@ -75,7 +71,6 @@ SERVICES = {
         "endpoint_prefix": "codepipeline",
         "service_id": "codepipeline",
     },
-    "codestar": {"endpoint_prefix": "codestar", "service_id": "codestar"},
     "cognito-identity": {
         "endpoint_prefix": "cognito-identity",
         "service_id": "cognito-identity",
@@ -177,14 +172,6 @@ SERVICES = {
         "endpoint_prefix": "data.jobs.iot",
         "service_id": "iot-jobs-data-plane",
     },
-    "iot1click-devices": {
-        "endpoint_prefix": "devices.iot1click",
-        "service_id": "iot-1click-devices-service",
-    },
-    "iot1click-projects": {
-        "endpoint_prefix": "projects.iot1click",
-        "service_id": "iot-1click-projects",
-    },
     "iotanalytics": {
         "endpoint_prefix": "iotanalytics",
         "service_id": "iotanalytics",
@@ -218,7 +205,6 @@ SERVICES = {
         "endpoint_prefix": "machinelearning",
         "service_id": "machine-learning",
     },
-    "macie": {"endpoint_prefix": "macie", "service_id": "macie"},
     "marketplace-entitlement": {
         "endpoint_prefix": "entitlement.marketplace",
         "service_id": "marketplace-entitlement-service",
@@ -253,7 +239,6 @@ SERVICES = {
         "service_id": "marketplace-metering",
     },
     "mgh": {"endpoint_prefix": "mgh", "service_id": "migration-hub"},
-    "mobile": {"endpoint_prefix": "mobile", "service_id": "mobile"},
     "mq": {"endpoint_prefix": "mq", "service_id": "mq"},
     "mturk": {"endpoint_prefix": "mturk-requester", "service_id": "mturk"},
     "neptune": {"service_id": "neptune"},
@@ -387,7 +372,7 @@ def _assert_handler_called(client_name, event_part):
         hook_calls.append(kwargs['event_name'])
 
     session = _get_session()
-    session.register('creating-client-class.%s' % event_part, _hook)
+    session.register(f'creating-client-class.{event_part}', _hook)
     session.create_client(client_name)
     assert len(hook_calls) == 1
 

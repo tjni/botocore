@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-20.04
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938
     - name: Set up Python 3.9
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
       with:
         python-version: 3.9
     - name: Run pre-commit
-      uses: pre-commit/action@v3.0.0
+      uses: pre-commit/action@646c83fcd040023954eafda54b4db0192ce70507
